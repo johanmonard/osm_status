@@ -19,8 +19,24 @@ DEFAULT_LAYERS = {
         "filters": ['["highway"]'],
         "geometry": "line"
     },
+    "powerlines": {
+        "filters": ['["power"="line"]', '["power"="minor_line"]'],
+        "geometry": "line"
+    },
     "landuse": {
         "filters": ['["landuse"]'],
+        "geometry": "polygon"
+    },
+    "forests": {
+        "filters": ['["natural"="wood"]', '["landcover"="trees"]'],
+        "geometry": "polygon"
+    },
+    "scrub": {
+        "filters": ['["natural"="scrub"]', '["natural"="heath"]'],
+        "geometry": "polygon"
+    },
+    "bare_ground": {
+        "filters": ['["natural"="bare_rock"]', '["natural"="sand"]'],
         "geometry": "polygon"
     },
     "transport": {
@@ -31,6 +47,10 @@ DEFAULT_LAYERS = {
         "filters": ['["building"]'],
         "geometry": "polygon"
     },
+    "parks": {
+        "filters": ['["leisure"="park"]', '["leisure"="garden"]', '["leisure"="nature_reserve"]'],
+        "geometry": "polygon"
+    },
     "water": {
         "filters": [
             '["natural"="water"]',
@@ -39,6 +59,14 @@ DEFAULT_LAYERS = {
             '["natural"="bay"]'
         ],
         "geometry": "polygon"
+    },
+    "shore_structures": {
+        "filters": ['["man_made"="pier"]', '["man_made"="harbour"]'],
+        "geometry": "polygon"
+    },
+    "dams": {
+        "filters": ['["waterway"="dam"]', '["waterway"="weir"]'],
+        "geometry": "line"
     },
     "railways": {
         "filters": ['["railway"]'],
@@ -404,7 +432,7 @@ def save_fclass_plot(
         merged.to_crs(4326).plot(
             ax=ax,
             color=color_map[fclass],
-            alpha=0.7,
+            alpha=0.5,
             linewidth=0.8,
         )
 
@@ -442,12 +470,12 @@ def save_fclass_plot(
 
 if __name__ == "__main__":
 
-    # poly = load_kml_polygon(r"lake2lake_poly.kml")
+    poly = load_kml_polygon(r"lake2lake_poly.kml")
     # poly = load_kml_polygon(r"annecy.kml")
     # poly = load_kml_polygon(r"South Fang.kml")
     # poly = load_kml_polygon(r"cuba3d.kml")
     # poly = load_kml_polygon(r"ramhan.kml")
-    poly = load_kml_polygon(r"North East Obaiyed & North Matruh.kml")
+    # poly = load_kml_polygon(r"North East Obaiyed & North Matruh.kml")
 
     
     
