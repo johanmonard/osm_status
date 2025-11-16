@@ -373,6 +373,8 @@ def save_fclass_plot(
     import matplotlib.pyplot as plt
     import matplotlib.patches as mpatches
     import matplotlib.cm as cm
+    import contextily as ctx
+    from shapely.ops import unary_union
 
     metric_key = "area" if mode == "area" else "length"
     metric_values = fclass_stats.get(metric_key, {})
@@ -394,7 +396,7 @@ def save_fclass_plot(
 
     colors = cm.tab20.colors
 
-    fig, ax = plt.subplots(figsize=(14, 14))
+    fig, ax = plt.subplots(figsize=(20, 20))
 
     geom_filter = {
         "area": ["Polygon", "MultiPolygon"],
@@ -427,9 +429,44 @@ def save_fclass_plot(
     legend_handles = []
     unit_label = "km²" if mode == "area" else "km"
 
+    prepared = []
     for fclass, total, subsets in plot_items:
         merged = gpd.GeoDataFrame(pd.concat(subsets), crs=subsets[0].crs)
-        merged.to_crs(4326).plot(
+        merged_3857 = merged.to_crs(3857)
+        prepared.append((fclass, total, merged_3857))
+
+    extent_geoms = [gdf.geometry.union_all() for _, _, gdf in prepared]
+    polygon_3857 = None
+    if polygon is not None:
+        polygon_3857 = gpd.GeoSeries([polygon], crs="EPSG:4326").to_crs(3857).iloc[0]
+        extent_geoms.append(polygon_3857)
+
+    extent_geoms = [geom for geom in extent_geoms if geom and not geom.is_empty]
+    zoom_level = 12
+    if extent_geoms:
+        combined = unary_union(extent_geoms)
+        minx, miny, maxx, maxy = combined.bounds
+        width = maxx - minx
+        pad_left = width * 0.05 if width > 0 else 1000
+        pad_right = width * 0.35 if width > 0 else 6000
+        pad_y = (maxy - miny) * 0.05 if maxy > miny else 1000
+        ax.set_xlim(minx - pad_left, maxx + pad_right)
+        ax.set_ylim(miny - pad_y, maxy + pad_y)
+        span = max(width, maxy - miny)
+        if span > 500_000:
+            zoom_level = 8
+        elif span > 200_000:
+            zoom_level = 10
+        elif span < 15_000:
+            zoom_level = 14
+        elif span < 30_000:
+            zoom_level = 13
+
+    ctx.add_basemap(ax, source=ctx.providers.CartoDB.DarkMatter, crs=3857, zoom=zoom_level)
+    ax.set_axis_off()
+
+    for fclass, total, merged_3857 in prepared:
+        merged_3857.plot(
             ax=ax,
             color=color_map[fclass],
             alpha=0.5,
@@ -444,8 +481,8 @@ def save_fclass_plot(
         legend_label = f"{fclass} ({total:.1f} {unit_label}{pct_str})"
         legend_handles.append(mpatches.Patch(color=color_map[fclass], label=legend_label))
 
-    if polygon is not None:
-        boundary = gpd.GeoSeries([polygon], crs="EPSG:4326")
+    if polygon_3857 is not None:
+        boundary = gpd.GeoSeries([polygon_3857], crs=3857)
         boundary.plot(
             ax=ax,
             facecolor="none",
@@ -459,10 +496,9 @@ def save_fclass_plot(
         title = f"{title}, {total_percent:.1f}% of polygon"
     ax.legend(handles=legend_handles, title=title)
 
-    plt.tight_layout(pad=0.3)
     out = os.path.join(target_folder, f"top_fclass_{mode}.png")
-    plt.savefig(out, dpi=300)
-    plt.close()
+    fig.savefig(out, dpi=300, bbox_inches="tight", pad_inches=0)
+    plt.close(fig)
 
 # -----------------------------------------------------------------------------
 # TEST
