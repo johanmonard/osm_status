@@ -1,10 +1,14 @@
 import os
+import re
+import io
+from contextlib import redirect_stdout, redirect_stderr
 from collections import defaultdict
 
 import geopandas as gpd
 import pandas as pd
 import requests
 from shapely.geometry import LineString, MultiPolygon, Polygon, shape
+from osm2geojson import json2geojson
 
 # -----------------------------------------------------------------------------
 # DEFAULT LAYERS
@@ -54,6 +58,15 @@ def overpass_download_geoms(filters, polygon):
     bbox = polygon.bounds
     west, south, east, north = bbox
 
+    filter_specs = []
+    pattern = re.compile(r'\["([^"]+)"(?:="([^"]+)")?\]')
+    for fl in filters:
+        match = pattern.search(fl)
+        if match:
+            filter_specs.append((match.group(1), match.group(2)))
+        else:
+            filter_specs.append((fl, None))
+
     def _build_block(fltk):
         return [
             f"way{fltk}({south},{west},{north},{east});",
@@ -69,7 +82,8 @@ def overpass_download_geoms(filters, polygon):
         "(\n"
         f"{body}\n"
         ");\n"
-        "out geom tags;"
+        "(._;>;);\n"
+        "out body geom;"
     )
     r = requests.post("https://overpass-api.de/api/interpreter", data={"data": query})
     if r.status_code != 200:
@@ -77,40 +91,44 @@ def overpass_download_geoms(filters, polygon):
 
     data = r.json()
 
+    try:
+        stdout_buffer = io.StringIO()
+        stderr_buffer = io.StringIO()
+        with redirect_stdout(stdout_buffer), redirect_stderr(stderr_buffer):
+            geojson = json2geojson(data)
+    except Exception as exc:
+        raise RuntimeError("Overpass conversion error") from exc
+
     geoms = []
     fclasses = []
-
-    for el in data.get("elements", []):
-        if "geometry" not in el:
+    for feature in geojson.get("features", []):
+        geom = feature.get("geometry")
+        if not geom:
+            continue
+        try:
+            shp = shape(geom)
+        except Exception:
             continue
 
-        # détecter le fclass selon les tags
+        props = feature.get("properties", {}) or {}
+        tags = props.get("tags", {}) if isinstance(props.get("tags"), dict) else {}
         fclass = None
-        tags = el.get("tags", {})
-        for fl in filters:
-            key = fl.split("\"")[1]   # "highway", "natural", "landuse", ...
-            if key in tags:
-                fclass = tags[key]
-                break
+        for key, value in filter_specs:
+            tag_val = props.get(key)
+            if tag_val is None:
+                tag_val = tags.get(key)
+            if tag_val is None:
+                continue
+            if value is not None and tag_val != value:
+                continue
+            fclass = tag_val
+            break
 
-        coords = [(p["lon"], p["lat"]) for p in el["geometry"]]
-
-        if len(coords) < 2:
+        if fclass is None:
             continue
 
-        # polygone fermé
-        if coords[0] == coords[-1] and len(coords) >= 4:
-            try:
-                geoms.append(Polygon(coords))
-                fclasses.append(fclass)
-            except:
-                pass
-        else:
-            try:
-                geoms.append(LineString(coords))
-                fclasses.append(fclass)
-            except:
-                pass
+        geoms.append(shp)
+        fclasses.append(fclass)
 
     if not geoms:
         return gpd.GeoDataFrame(columns=["geometry", "fclass"], crs="EPSG:4326")
@@ -143,6 +161,37 @@ def compute_statistics(gdf, polygon):
     return {"total_km2": poly_area_km2, "total_km": line_km, "gdf": clip}
 
 # -----------------------------------------------------------------------------
+# Helpers
+# -----------------------------------------------------------------------------
+
+def _flatten_geometrycollections(gdf):
+    """
+    Split GeometryCollections produced by overlay into their constituent parts
+    so polygon/line pieces can be measured.
+    """
+
+    def _iter_parts(geom):
+        if geom is None or geom.is_empty:
+            return
+        if geom.geom_type == "GeometryCollection":
+            for part in geom:
+                yield from _iter_parts(part)
+        else:
+            yield geom
+
+    rows = []
+    for _, row in gdf.iterrows():
+        base = row.drop(labels="geometry").to_dict()
+        for part in _iter_parts(row.geometry):
+            rec = dict(base)
+            rec["geometry"] = part
+            rows.append(rec)
+
+    if not rows:
+        return gpd.GeoDataFrame(columns=gdf.columns, crs=gdf.crs)
+
+    return gpd.GeoDataFrame(rows, columns=gdf.columns, crs=gdf.crs)
+
 # MAIN FUNCTION
 # -----------------------------------------------------------------------------
 
@@ -173,8 +222,11 @@ def download_crop_osm(layers=None, polygon=None, target_folder="output"):
         results[layer] = stats
 
         if "gdf" in stats and not stats["gdf"].empty:
-            stats["gdf"].to_file(os.path.join(target_folder, f"{layer}.gpkg"), driver="GPKG")
-            geoms[layer] = stats["gdf"]
+            clean_gdf = _flatten_geometrycollections(stats["gdf"])
+            if not clean_gdf.empty:
+                stats["gdf"] = clean_gdf
+                clean_gdf.to_file(os.path.join(target_folder, f"{layer}.gpkg"), driver="GPKG")
+                geoms[layer] = clean_gdf
 
         # Impression des statistiques
     for layer, stats in results.items():
@@ -239,6 +291,9 @@ def compute_fclass_statistics(results):
             continue
 
         gdf_m = gdf.to_crs(3857)
+        gdf_m = _flatten_geometrycollections(gdf_m)
+        if gdf_m.empty:
+            continue
         polygons = gdf_m[gdf_m.geom_type.isin(["Polygon", "MultiPolygon"])]
         if not polygons.empty:
             for fclass, sub in polygons.groupby("fclass"):
@@ -387,11 +442,12 @@ def save_fclass_plot(
 
 if __name__ == "__main__":
 
-    poly = load_kml_polygon(r"lake2lake_poly.kml")
+    # poly = load_kml_polygon(r"lake2lake_poly.kml")
+    # poly = load_kml_polygon(r"annecy.kml")
     # poly = load_kml_polygon(r"South Fang.kml")
     # poly = load_kml_polygon(r"cuba3d.kml")
     # poly = load_kml_polygon(r"ramhan.kml")
-    # poly = load_kml_polygon(r"North East Obaiyed & North Matruh.kml")
+    poly = load_kml_polygon(r"North East Obaiyed & North Matruh.kml")
 
     
     
@@ -423,7 +479,7 @@ if __name__ == "__main__":
         fclass_stats,
         geoms,
         target_folder,
-        n=10,
+        n=25,
         mode="area",
         reference=polygon_reference,
         polygon=poly,
@@ -432,7 +488,7 @@ if __name__ == "__main__":
         fclass_stats,
         geoms,
         target_folder,
-        n=10,
+        n=25,
         mode="length",
         reference=polygon_reference,
         polygon=poly,
