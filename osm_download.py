@@ -506,15 +506,12 @@ def save_fclass_plot(
 
 if __name__ == "__main__":
 
-    poly = load_kml_polygon(r"lake2lake_poly.kml")
-    # poly = load_kml_polygon(r"annecy.kml")
-    # poly = load_kml_polygon(r"South Fang.kml")
-    # poly = load_kml_polygon(r"cuba3d.kml")
-    # poly = load_kml_polygon(r"ramhan.kml")
-    # poly = load_kml_polygon(r"North East Obaiyed & North Matruh.kml")
-
-    
-    
+    poly = load_kml_polygon(r"input/lake2lake_poly.kml")
+    # poly = load_kml_polygon(r"input/annecy.kml")
+    # poly = load_kml_polygon(r"input/South Fang.kml")
+    # poly = load_kml_polygon(r"input/cuba3d.kml")
+    # poly = load_kml_polygon(r"input/ramhan.kml")
+    # poly = load_kml_polygon(r"input/North East Obaiyed & North Matruh.kml")
 
     target_folder = r"output"
     poly_copy = shape(poly.__geo_interface__)
