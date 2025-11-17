@@ -1,1 +1,0 @@
-Ignore the old folder unless instructed otherwise.

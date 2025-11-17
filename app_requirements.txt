@@ -1,0 +1,6 @@
+dash>=3.0
+dash-mantine-components>=0.12
+plotly>=5.17
+geopandas>=0.14
+pyproj>=3.6
+requests>=2.31
