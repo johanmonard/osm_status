@@ -26,7 +26,7 @@ def run_pipeline(
         cache_path=config["geofabrik_cache"],
         chunk_size=config["download_chunk_size"],
     )
-    processor = LayerProcessor(PROCESSED_DIR, config["layers"])
+    processor = LayerProcessor(PROCESSED_DIR, config["layers"], config["simplify_tolerance"])
     polygon_geom = shape(polygon_geojson)
 
     progress_callback(0.05, "Resolving Geofabrik region...")

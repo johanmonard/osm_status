@@ -70,6 +70,9 @@ APP_CONFIG = {
     "geofabrik_index_url": "https://download.geofabrik.de/index-v1.json",
     "geofabrik_cache": TILESERVER_DIR / "geofabrik-index.json",
     "download_chunk_size": 1_048_576,
+    # "simplify_tolerance": 0.0007,
+    "simplify_tolerance": 0.005,
+    "detail_zoom_threshold": 13,
     "tileserver": {
         "port": 8090,
         "config_path": TILESERVER_DIR / "tileserver.config.json",

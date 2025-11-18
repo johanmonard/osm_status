@@ -85,7 +85,6 @@ server = app.server
 app.layout = dmc.MantineProvider(
     id="theme-provider",
     theme={"colorScheme": "dark"},
-    withGlobalClasses=True,
     children=dmc.Container(
         [
             dmc.Stack(
@@ -162,6 +161,8 @@ app.layout = dmc.MantineProvider(
                             ),
                             dmc.Space(h=5),
                             dmc.Alert("Waiting for tasks...", id="job-alert", color="gray"),
+                            dmc.Space(h=10),
+                            dmc.Text(id="zoom-indicator", children="Zoom : --"),
                         ],
                         withBorder=True,
                         shadow="sm",
@@ -187,10 +188,11 @@ app.layout = dmc.MantineProvider(
                 ],
                 gap="xl",
             ),
-            dcc.Store(id="polygon-store", data=c_cached_polygon),
-            dcc.Store(id="job-store"),
-            dcc.Store(id="processed-store", data=c_cached_processed),
-            dcc.Interval(id="job-poll", interval=2000, disabled=True),
+dcc.Store(id="polygon-store", data=c_cached_polygon),
+dcc.Store(id="job-store"),
+dcc.Store(id="processed-store", data=c_cached_processed),
+dcc.Store(id="zoom-store", data={"zoom": APP_CONFIG.get("detail_zoom_threshold", 11)}),
+dcc.Interval(id="job-poll", interval=2000, disabled=True),
         ],
         size="xl",
         pt=30,
@@ -289,8 +291,9 @@ def monitor_job(_n, job_meta):
     Input("map-background", "value"),
     Input("show-boundary", "checked"),
     State("polygon-store", "data"),
+    State("zoom-store", "data"),
 )
-def update_map(processed_store, mode, fclass_filter, background_value, show_boundary, polygon_store):
+def update_map(processed_store, mode, fclass_filter, background_value, show_boundary, polygon_store, zoom_state):
     style = background_value or default_background
     if style == "local":
         if tile_server_running:
@@ -306,12 +309,19 @@ def update_map(processed_store, mode, fclass_filter, background_value, show_boun
             boundary = processed_store.get("polygon_geojson")
         elif polygon_store:
             boundary = json.loads(polygon_store)
+    zoom_level = (zoom_state or {}).get("zoom", APP_CONFIG.get("detail_zoom_threshold", 11))
+    use_simple = zoom_level < APP_CONFIG.get("detail_zoom_threshold", 11)
+
     if not processed_store:
         extent = json.loads(polygon_store) if polygon_store else None
         return map_factory.build(None, None, mode, extent_geojson=extent, selected_fclasses=fclass_filter, boundary_geojson=boundary)
     grouped = processed_store["processed"]["grouped"]
+    grouped_simple = processed_store["processed"].get("grouped_simple", {})
     polygons_path = grouped.get("polygon")
     lines_path = grouped.get("line")
+    if use_simple:
+        polygons_path = grouped_simple.get("polygon", polygons_path)
+        lines_path = grouped_simple.get("line", lines_path)
     extent = processed_store.get("polygon_geojson")
     if not extent and polygon_store:
         extent = json.loads(polygon_store)
@@ -323,6 +333,60 @@ def update_map(processed_store, mode, fclass_filter, background_value, show_boun
         selected_fclasses=fclass_filter,
         boundary_geojson=boundary,
     )
+
+
+@app.callback(
+    Output("zoom-store", "data"),
+    Input("map-graph", "relayoutData"),
+    State("zoom-store", "data"),
+    prevent_initial_call=True,
+)
+def capture_zoom(relayout_data, current):
+    if not relayout_data:
+        raise PreventUpdate
+    zoom = relayout_data.get("mapbox.zoom")
+    if zoom is None:
+        for key, value in relayout_data.items():
+            if key.endswith("zoom"):
+                zoom = value
+                break
+    if zoom is None:
+        raise PreventUpdate
+    state = current or {}
+    if isinstance(state, list) and state:
+        state = state[-1]
+    if isinstance(state, str):
+        try:
+            state = {"zoom": float(state)}
+        except ValueError:
+            state = {}
+    elif not isinstance(state, dict):
+        state = {"zoom": state} if isinstance(state, (int, float)) else {}
+    current_zoom = state.get("zoom")
+    if current_zoom is not None and abs(current_zoom - zoom) < 0.05:
+        raise PreventUpdate
+    return {"zoom": zoom}
+
+
+@app.callback(
+    Output("zoom-indicator", "children"),
+    Input("zoom-store", "data"),
+)
+def update_zoom_indicator(zoom_state):
+    state = zoom_state or {}
+    if isinstance(state, list) and state:
+        state = state[-1]
+    if isinstance(state, str):
+        try:
+            state = {"zoom": float(state)}
+        except ValueError:
+            state = {}
+    elif not isinstance(state, dict):
+        state = {"zoom": state} if isinstance(state, (int, float)) else {}
+    zoom_value = state.get("zoom")
+    if zoom_value is None:
+        return "Zoom : --"
+    return f"Zoom : {zoom_value:.1f}"
 
 
 @app.callback(
@@ -343,3 +407,17 @@ def sync_fclass_filter(processed_store):
 
 if __name__ == "__main__":
     app.run(debug=True)
+@app.callback(
+    Output("zoom-indicator", "children"),
+    Input("zoom-store", "data"),
+)
+def update_zoom_indicator(zoom_state):
+    state = zoom_state or {}
+    if isinstance(state, list) and state:
+        state = state[-1]
+    if not isinstance(state, dict):
+        state = {"zoom": state} if isinstance(state, (int, float)) else {}
+    zoom_value = state.get("zoom")
+    if zoom_value is None:
+        return "Zoom : --"
+    return f"Zoom : {zoom_value:.1f}"

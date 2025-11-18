@@ -40,8 +40,11 @@ archive/                  # Legacy scripts (ignored unless explicitly needed)
 | `handle_polygon_upload` | `dcc.Upload#upload-polygon.contents` | `polygon-store`, summary alert | Decode base64 KML, parse polygon, store GeoJSON + stats |
 | `trigger_pipeline` | Button click + `polygon-store` | `job-store`, progress controls | Start threaded pipeline job, reset UI state |
 | `monitor_job` | `dcc.Interval#job-poll` + `job-store` | progress bar, alerts, `processed-store` | Poll BackgroundJobManager until success/failure |
+| `update_map` | Processed-store, layer mode, fclass filter, basemap dropdown, AOI toggle, zoom-store | `dcc.Graph#map-graph` | Render polygons/lines using either simplified or full-detail GeoJSON depending on current zoom level and user filters |
+| `sync_fclass_filter` | `processed-store` | `MultiSelect#fclass-filter` | Populate/auto-select `fclass` options after each job |
+| `capture_zoom` | `dcc.Graph#map-graph.relayoutData` | `zoom-store` | Persist the latest Mapbox zoom so `update_map` can pick the correct data fidelity |
 
-`processed-store` holds the pipeline result: `{"region": "...", "download_path": "...", "processed": {"layers": [...], "grouped": {"polygon": "<path>", "line": "<path>"}}}`.
+`processed-store` holds the pipeline result: `{"region": "...", "download_path": "...", "processed": {"layers": [...], "grouped": {"polygon": "<path>", "line": "<path>"},"grouped_simple": {...}}, "polygon_geojson": {...}}`.
 
 ## Installation
 
