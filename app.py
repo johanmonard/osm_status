@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import json
 import os
+from pathlib import Path
 
 import dash
 from dash import Dash, Input, Output, State, dcc, html, no_update
@@ -14,36 +15,33 @@ from app_modules import (
     BackgroundJobManager,
     MapFigureFactory,
     TileServerManager,
+    convert_to_mbtiles,
+    download_geofabrik,
     geometry_to_geojson,
     load_polygon_from_kml,
     polygon_summary,
-    run_pipeline,
+    process_geofabrik,
 )
-from app_modules.config import PROCESSED_DIR
+from app_modules.pipeline import load_cached_download, load_cached_mbtiles, load_cached_processed
 
 
 job_manager = BackgroundJobManager()
 tileserver_manager = TileServerManager(APP_CONFIG["tileserver"])
 tileserver_manager.write_config()
-tile_server_running = tileserver_manager.start()
 mapbox_token = os.getenv("MAPBOX_TOKEN")
 
-if tile_server_running:
-    map_style = f"http://127.0.0.1:{APP_CONFIG['tileserver']['port']}/styles/osm-bright/style.json"
-    tile_status = ("green", "TileServer GL is running locally.")
+if mapbox_token:
+    map_style = "carto-positron"
+    tile_status = (
+        "green",
+        "MAPBOX_TOKEN detected. Using Mapbox tiles in the Dash map; the Python vector tile server activates automatically once Step 3 completes.",
+    )
 else:
-    if mapbox_token:
-        map_style = "carto-positron"
-        tile_status = (
-            "yellow",
-            "TileServer GL binary not found. Using Mapbox tiles (requires MAPBOX_TOKEN).",
-        )
-    else:
-        map_style = "open-street-map"
-        tile_status = (
-            "yellow",
-            "TileServer GL binary not found and MAPBOX_TOKEN missing. Falling back to OpenStreetMap tiles.",
-        )
+    map_style = "open-street-map"
+    tile_status = (
+        "yellow",
+        "MAPBOX_TOKEN not set. Using Plotly's OpenStreetMap tiles; the Python vector tile server activates automatically once Step 3 completes.",
+    )
 
 background_options = [
     {"label": "OpenStreetMap", "value": "open-street-map"},
@@ -53,30 +51,26 @@ background_options = [
     {"label": "Stamen Toner", "value": "stamen-toner"},
     {"label": "Stamen Watercolor", "value": "stamen-watercolor"},
 ]
-if tile_server_running:
-    background_options.insert(
-        0,
-        {"label": "Local TileServer", "value": "local"},
-    )
 default_background = background_options[0]["value"]
 
 map_factory = MapFigureFactory(map_style, access_token=mapbox_token)
 
 
-def load_cached_state() -> tuple[str | None, dict | None]:
-    cache_path = PROCESSED_DIR / "latest_run.json"
-    if not cache_path.exists():
-        return None, None
-    try:
-        data = json.loads(cache_path.read_text(encoding="utf-8"))
-        polygon_data = data.get("polygon_geojson")
-        polygon_store_data = json.dumps(polygon_data) if polygon_data else None
-        return polygon_store_data, data
-    except Exception:
-        return None, None
+c_cached_processed = load_cached_processed()
+c_cached_download = load_cached_download()
+c_cached_mbtiles = load_cached_mbtiles()
 
+if c_cached_mbtiles:
+    cached_path = Path(c_cached_mbtiles.get("mbtiles_path", ""))
+    if cached_path.exists():
+        tileserver_manager.start()
 
-c_cached_polygon, c_cached_processed = load_cached_state()
+def _default_polygon_store() -> str | None:
+    if c_cached_processed and c_cached_processed.get("polygon_geojson"):
+        return json.dumps(c_cached_processed["polygon_geojson"])
+    if c_cached_download and c_cached_download.get("polygon_geojson"):
+        return json.dumps(c_cached_download["polygon_geojson"])
+    return None
 
 external_scripts = []
 app = Dash(__name__, suppress_callback_exceptions=True)
@@ -106,29 +100,25 @@ app.layout = dmc.MantineProvider(
                                 color="gray",
                             ),
                             dmc.Space(h=20),
-                            dmc.Text("2. Run the Geofabrik download and processing pipeline."),
-                            dmc.Group(
-                                [
-                                    dmc.Button("Start download & processing", id="start-processing", disabled=False),
-                                    dmc.SegmentedControl(
-                                        id="layer-mode",
-                                        data=[
-                                            {"label": "Polygons", "value": "polygon"},
-                                            {"label": "Lines", "value": "line"},
-                                            {"label": "Both", "value": "both"},
-                                        ],
-                                        value="polygon",
-                                    ),
+                            dmc.Text(
+                                "2. Configure your map display options. Use the workflow cards below to run each step independently.",
+                            ),
+                            dmc.SegmentedControl(
+                                id="layer-mode",
+                                data=[
+                                    {"label": "Polygons", "value": "polygon"},
+                                    {"label": "Lines", "value": "line"},
+                                    {"label": "Both", "value": "both"},
                                 ],
-                                justify="space-between",
+                                value="polygon",
                             ),
                             dmc.Space(h=10),
                             dmc.MultiSelect(
                                 id="fclass-filter",
                                 data=[],
                                 value=[],
-                                placeholder="Filtrer par fclass (défaut : toutes)",
-                                nothingFoundMessage="Aucune fclass",
+                                placeholder="Filter by fclass (default: all)",
+                                nothingFoundMessage="No classes found",
                                 searchable=True,
                                 clearable=True,
                             ),
@@ -141,32 +131,66 @@ app.layout = dmc.MantineProvider(
                                         value=default_background,
                                         label="Fond de carte",
                                     ),
-                                    dmc.Switch(
-                                        id="show-boundary",
-                                        label="Afficher le polygone",
-                                        checked=False,
-                                        onLabel="AOI",
-                                        offLabel="AOI",
-                                    ),
+                            dmc.Switch(
+                                id="show-boundary",
+                                label="Show polygon",
+                                checked=False,
+                                onLabel="AOI",
+                                offLabel="AOI",
+                            ),
                                 ],
                                 grow=True,
                             ),
-                            dmc.Space(h=10),
-                            dmc.Progress(
-                                id="job-progress",
-                                value=0,
-                                color="blue",
-                                size="lg",
-                                striped=True,
-                            ),
-                            dmc.Space(h=5),
-                            dmc.Alert("Waiting for tasks...", id="job-alert", color="gray"),
                             dmc.Space(h=10),
                             dmc.Text(id="zoom-indicator", children="Zoom : --"),
                         ],
                         withBorder=True,
                         shadow="sm",
                         padding="lg",
+                    ),
+                    dmc.Card(
+                        [
+                            dmc.Title("Step 1 · Geofabrik Download", order=4),
+                            dmc.Button("Download", id="download-button"),
+                            dmc.Space(h=5),
+                            dmc.Progress(id="download-progress", value=0, striped=True, color="blue"),
+                            dmc.Space(h=5),
+                            dmc.Text("Waiting...", id="download-status", c="gray"),
+                            dmc.Text("", id="download-details", size="sm", c="dimmed"),
+                        ],
+                        withBorder=True,
+                        padding="lg",
+                        shadow="sm",
+                    ),
+                    dmc.Card(
+                        [
+                            dmc.Title("Step 2 · Processing", order=4),
+                            dmc.Button("Process archive", id="process-button"),
+                            dmc.Space(h=5),
+                            dmc.Button("Run Step 2 processing", id="process-step-trigger", variant="outline"),
+                            dmc.Space(h=5),
+                            dmc.Progress(id="process-progress", value=0, striped=True, color="blue"),
+                            dmc.Space(h=5),
+                            dmc.Text("Waiting...", id="process-status", c="gray"),
+                            dmc.Text("", id="process-details", size="sm", c="dimmed"),
+                        ],
+                        withBorder=True,
+                        padding="lg",
+                        shadow="sm",
+                    ),
+                    dmc.Card(
+                        [
+                            dmc.Title("Step 3 · Convert to MBTiles", order=4),
+                            dmc.Button("Create MBTiles", id="mbtiles-button"),
+                            dmc.Space(h=5),
+                            dmc.Progress(id="mbtiles-progress", value=0, striped=True, color="blue"),
+                            dmc.Space(h=5),
+                            dmc.Text("Waiting...", id="mbtiles-status", c="gray"),
+                            dmc.Text("", id="mbtiles-details", size="sm", c="dimmed"),
+                        ],
+                        withBorder=True,
+                        padding="lg",
+                        shadow="sm",
                     ),
                     dmc.Card(
                         [
@@ -185,14 +209,38 @@ app.layout = dmc.MantineProvider(
                         padding="lg",
                         shadow="sm",
                     ),
+                    dmc.Card(
+                        [
+                            dmc.Title("Vector tile preview (MapLibre)", order=4),
+                            dmc.Text(
+                                "This preview loads the MBTiles through the built-in Python tile server once Step 3 completes.",
+                                size="sm",
+                                c="dimmed",
+                            ),
+                            html.Iframe(
+                                id="local-tile-frame",
+                                src="/assets/local_tiles_viewer.html",
+                                style={"width": "100%", "height": "500px", "border": "none"},
+                            ),
+                        ],
+                        id="local-tile-card",
+                        withBorder=True,
+                        padding="lg",
+                        shadow="sm",
+                        style={"display": "none"},
+                    ),
                 ],
                 gap="xl",
             ),
-dcc.Store(id="polygon-store", data=c_cached_polygon),
-dcc.Store(id="job-store"),
-dcc.Store(id="processed-store", data=c_cached_processed),
-dcc.Store(id="zoom-store", data={"zoom": APP_CONFIG.get("detail_zoom_threshold", 11)}),
-dcc.Interval(id="job-poll", interval=2000, disabled=True),
+            dcc.Store(id="polygon-store", data=_default_polygon_store()),
+            dcc.Store(id="download-job-store"),
+            dcc.Store(id="process-job-store"),
+            dcc.Store(id="mbtiles-job-store"),
+            dcc.Store(id="download-metadata-store", data=c_cached_download),
+            dcc.Store(id="processed-store", data=c_cached_processed),
+            dcc.Store(id="mbtiles-metadata-store", data=c_cached_mbtiles),
+            dcc.Store(id="zoom-store", data={"zoom": APP_CONFIG.get("detail_zoom_threshold", 13)}),
+            dcc.Interval(id="job-poll", interval=2000, disabled=False),
         ],
         size="xl",
         pt=30,
@@ -227,60 +275,26 @@ def handle_polygon_upload(contents: str | None, filename: str | None):
 
 
 @app.callback(
-    Output("job-store", "data", allow_duplicate=True),
-    Output("job-alert", "children", allow_duplicate=True),
-    Output("job-alert", "color", allow_duplicate=True),
-    Output("job-progress", "value", allow_duplicate=True),
-    Output("job-poll", "disabled", allow_duplicate=True),
-    Output("processed-store", "data", allow_duplicate=True),
-    Input("start-processing", "n_clicks"),
-    State("polygon-store", "data"),
-    prevent_initial_call=True,
-    allow_duplicate=True,
+    Output("download-button", "disabled"),
+    Output("process-button", "disabled"),
+    Output("process-step-trigger", "disabled"),
+    Output("mbtiles-button", "disabled"),
+    Input("download-job-store", "data"),
+    Input("process-job-store", "data"),
+    Input("mbtiles-job-store", "data"),
+    Input("polygon-store", "data"),
+    Input("download-metadata-store", "data"),
+    Input("processed-store", "data"),
 )
-def trigger_pipeline(n_clicks, polygon_store):
-    if not n_clicks:
-        raise PreventUpdate
-    if not polygon_store:
-        return no_update, "Upload a polygon first.", "red", 0, True, no_update
+def coordinator_button_states(download_job, process_job, mbtiles_job, polygon_store, download_meta, processed_meta):
+    download_running = bool(download_job and download_job.get("job_id"))
+    process_running = bool(process_job and process_job.get("job_id"))
+    mbtiles_running = bool(mbtiles_job and mbtiles_job.get("job_id"))
 
-    polygon_geojson = json.loads(polygon_store)
-    job = job_manager.create_job(run_pipeline, polygon_geojson=polygon_geojson)
-    return (
-        {"job_id": job.job_id},
-        "Pipeline running...",
-        "blue",
-        0,
-        False,
-        None,
-    )
-
-
-@app.callback(
-    Output("job-progress", "value", allow_duplicate=True),
-    Output("job-alert", "children", allow_duplicate=True),
-    Output("job-alert", "color", allow_duplicate=True),
-    Output("job-store", "data", allow_duplicate=True),
-    Output("processed-store", "data", allow_duplicate=True),
-    Output("job-poll", "disabled", allow_duplicate=True),
-    Input("job-poll", "n_intervals"),
-    State("job-store", "data"),
-    prevent_initial_call=True,
-    allow_duplicate=True,
-)
-def monitor_job(_n, job_meta):
-    if not job_meta:
-        raise PreventUpdate
-    job = job_manager.get_job(job_meta["job_id"])
-    if not job:
-        return 0, "Unknown job", "red", None, no_update, True
-
-    progress_value = job.progress * 100
-    if job.status == "completed":
-        return 100, "Finished", "green", None, job.result, True
-    if job.status == "failed":
-        return progress_value, job.message or "Failed", "red", None, None, True
-    return progress_value, job.message or "Running...", "blue", job_meta, no_update, False
+    download_disabled = download_running
+    process_disabled = process_running
+    mbtiles_disabled = mbtiles_running
+    return download_disabled, process_disabled, process_disabled, mbtiles_disabled
 
 
 @app.callback(
@@ -295,13 +309,7 @@ def monitor_job(_n, job_meta):
 )
 def update_map(processed_store, mode, fclass_filter, background_value, show_boundary, polygon_store, zoom_state):
     style = background_value or default_background
-    if style == "local":
-        if tile_server_running:
-            resolved_style = f"http://127.0.0.1:{APP_CONFIG['tileserver']['port']}/styles/osm-bright/style.json"
-        else:
-            resolved_style = "open-street-map"
-    else:
-        resolved_style = style
+    resolved_style = style
     map_factory.style = resolved_style
     boundary = None
     if show_boundary:
@@ -309,8 +317,8 @@ def update_map(processed_store, mode, fclass_filter, background_value, show_boun
             boundary = processed_store.get("polygon_geojson")
         elif polygon_store:
             boundary = json.loads(polygon_store)
-    zoom_level = (zoom_state or {}).get("zoom", APP_CONFIG.get("detail_zoom_threshold", 11))
-    use_simple = zoom_level < APP_CONFIG.get("detail_zoom_threshold", 11)
+    zoom_level = (zoom_state or {}).get("zoom", APP_CONFIG.get("detail_zoom_threshold", 13))
+    use_simple = zoom_level < APP_CONFIG.get("detail_zoom_threshold", 13)
 
     if not processed_store:
         extent = json.loads(polygon_store) if polygon_store else None
@@ -390,6 +398,45 @@ def update_zoom_indicator(zoom_state):
 
 
 @app.callback(
+    Output("download-details", "children"),
+    Input("download-metadata-store", "data"),
+)
+def update_download_details(meta):
+    if not meta:
+        return "No download recorded."
+    region = meta.get("region") or "N/A"
+    archive = Path(meta.get("download_path", "")).name
+    ts = meta.get("timestamp", "")
+    return f"Region: {region} · Archive: {archive} · {ts}"
+
+
+@app.callback(
+    Output("process-details", "children"),
+    Input("processed-store", "data"),
+)
+def update_process_details(meta):
+    if not meta:
+        return "No processing record."
+    processed = meta.get("processed") or {}
+    layers = processed.get("layers") or []
+    total_features = sum(layer.get("feature_count", 0) for layer in layers)
+    ts = meta.get("timestamp", "")
+    return f"{len(layers)} layers · {total_features} features · {ts}"
+
+
+@app.callback(
+    Output("mbtiles-details", "children"),
+    Input("mbtiles-metadata-store", "data"),
+)
+def update_mbtiles_details(meta):
+    if not meta:
+        return "No MBTiles conversion performed."
+    path = Path(meta.get("mbtiles_path", "")).name
+    ts = meta.get("timestamp", "")
+    return f"File: {path} · {ts}"
+
+
+@app.callback(
     Output("fclass-filter", "data"),
     Output("fclass-filter", "value"),
     Input("processed-store", "data"),
@@ -401,23 +448,165 @@ def sync_fclass_filter(processed_store):
     combined = sorted({item for values in fclasses.values() for item in values})
     options = [{"label": fclass, "value": fclass} for fclass in combined]
     return options, combined
+@app.callback(
+    Output("download-job-store", "data", allow_duplicate=True),
+    Output("download-progress", "value", allow_duplicate=True),
+    Output("download-status", "children", allow_duplicate=True),
+    Output("download-status", "color", allow_duplicate=True),
+    Input("download-button", "n_clicks"),
+    State("polygon-store", "data"),
+    prevent_initial_call=True,
+    allow_duplicate=True,
+)
+def start_download_job(n_clicks, polygon_store):
+    if not n_clicks:
+        raise PreventUpdate
+    print(f"[callback] start_download_job triggered (n_clicks={n_clicks}, polygon_store={'set' if polygon_store else 'missing'})", flush=True)
+    if not polygon_store:
+        return None, 0, "Upload a polygon before downloading.", "red"
+    polygon_geojson = json.loads(polygon_store)
+    print("[callback] Download button accepted, creating job…", flush=True)
+    job = job_manager.create_job(download_geofabrik, polygon_geojson=polygon_geojson)
+    return {"job_id": job.job_id}, 5, "Downloading...", "blue"
 
 
+@app.callback(
+    Output("download-progress", "value", allow_duplicate=True),
+    Output("download-status", "children", allow_duplicate=True),
+    Output("download-status", "color", allow_duplicate=True),
+    Output("download-job-store", "data", allow_duplicate=True),
+    Output("download-metadata-store", "data", allow_duplicate=True),
+    Input("job-poll", "n_intervals"),
+    State("download-job-store", "data"),
+    prevent_initial_call=True,
+    allow_duplicate=True,
+)
+def monitor_download_job(_n, job_data):
+    if not job_data or not job_data.get("job_id"):
+        raise PreventUpdate
+    job = job_manager.get_job(job_data["job_id"])
+    if not job:
+        return 0, "Job not found.", "red", None, no_update
+    if job.status == "completed":
+        print("[callback] Download job completed", flush=True)
+        return 100, "Download completed.", "green", None, job.result
+    if job.status == "failed":
+        print(f"[callback] Download job failed: {job.error}", flush=True)
+        return 0, job.error or "Download failed.", "red", None, no_update
+    progress_value = max(5, job.progress * 100)
+    return progress_value, job.message or "Downloading...", "blue", job_data, no_update
+@app.callback(
+    Output("process-job-store", "data", allow_duplicate=True),
+    Output("process-progress", "value", allow_duplicate=True),
+    Output("process-status", "children", allow_duplicate=True),
+    Output("process-status", "color", allow_duplicate=True),
+    Input("process-button", "n_clicks"),
+    Input("process-step-trigger", "n_clicks"),
+    State("download-metadata-store", "data"),
+    prevent_initial_call=True,
+    allow_duplicate=True,
+)
+def start_process_job(primary_clicks, secondary_clicks, download_meta):
+    total_clicks = (primary_clicks or 0) + (secondary_clicks or 0)
+    if total_clicks == 0:
+        raise PreventUpdate
+    print(f"[callback] start_process_job triggered (clicks={total_clicks}, primary={primary_clicks}, secondary={secondary_clicks}, download_meta={'set' if download_meta else 'missing'})", flush=True)
+    if not download_meta:
+        return None, 0, "Download data before processing.", "red"
+    print("[callback] Processing button accepted, creating job…", flush=True)
+    job = job_manager.create_job(process_geofabrik, download_metadata=download_meta)
+    return {"job_id": job.job_id}, 5, "Processing...", "blue"
+
+
+@app.callback(
+    Output("process-progress", "value", allow_duplicate=True),
+    Output("process-status", "children", allow_duplicate=True),
+    Output("process-status", "color", allow_duplicate=True),
+    Output("process-job-store", "data", allow_duplicate=True),
+    Output("processed-store", "data", allow_duplicate=True),
+    Input("job-poll", "n_intervals"),
+    State("process-job-store", "data"),
+    prevent_initial_call=True,
+    allow_duplicate=True,
+)
+def monitor_process_job(_n, job_data):
+    if not job_data or not job_data.get("job_id"):
+        raise PreventUpdate
+    job = job_manager.get_job(job_data["job_id"])
+    if not job:
+        return 0, "Job not found.", "red", None, no_update
+    if job.status == "completed":
+        print("[callback] Processing job completed", flush=True)
+        return 100, "Processing finished.", "green", None, job.result
+    if job.status == "failed":
+        print(f"[callback] Processing job failed: {job.error}", flush=True)
+        return 0, job.error or "Processing failed.", "red", None, None
+    progress_value = max(5, job.progress * 100)
+    return progress_value, job.message or "Processing...", "blue", job_data, no_update
+@app.callback(
+    Output("mbtiles-job-store", "data", allow_duplicate=True),
+    Output("mbtiles-progress", "value", allow_duplicate=True),
+    Output("mbtiles-status", "children", allow_duplicate=True),
+    Output("mbtiles-status", "color", allow_duplicate=True),
+    Input("mbtiles-button", "n_clicks"),
+    State("processed-store", "data"),
+    prevent_initial_call=True,
+    allow_duplicate=True,
+)
+def start_mbtiles_job(n_clicks, processed_store):
+    if not n_clicks:
+        raise PreventUpdate
+    print(f"[callback] start_mbtiles_job triggered (n_clicks={n_clicks}, processed_store={'set' if processed_store else 'missing'})", flush=True)
+    if not processed_store:
+        return None, 0, "No processed GeoJSON available.", "red"
+    print("[callback] MBTiles button accepted, stopping tile server before rebuild…", flush=True)
+    tileserver_manager.stop()
+    print("[callback] MBTiles button accepted, creating job…", flush=True)
+    job = job_manager.create_job(convert_to_mbtiles, processed_metadata=processed_store)
+    return {"job_id": job.job_id}, 5, "Converting...", "blue"
+
+
+@app.callback(
+    Output("mbtiles-progress", "value", allow_duplicate=True),
+    Output("mbtiles-status", "children", allow_duplicate=True),
+    Output("mbtiles-status", "color", allow_duplicate=True),
+    Output("mbtiles-job-store", "data", allow_duplicate=True),
+    Output("mbtiles-metadata-store", "data", allow_duplicate=True),
+    Input("job-poll", "n_intervals"),
+    State("mbtiles-job-store", "data"),
+    prevent_initial_call=True,
+    allow_duplicate=True,
+)
+def monitor_mbtiles_job(_n, job_data):
+    if not job_data or not job_data.get("job_id"):
+        raise PreventUpdate
+    job = job_manager.get_job(job_data["job_id"])
+    if not job:
+        return 0, "Job not found.", "red", None, no_update
+    if job.status == "completed":
+        print("[callback] MBTiles job completed", flush=True)
+        tileserver_manager.start()
+        return 100, "MBTiles ready.", "green", None, job.result
+    if job.status == "failed":
+        print(f"[callback] MBTiles job failed: {job.error}", flush=True)
+        return 0, job.error or "Conversion failed.", "red", None, no_update
+    progress_value = max(5, job.progress * 100)
+    return progress_value, job.message or "Converting...", "blue", job_data, no_update
+
+
+@app.callback(
+    Output("local-tile-card", "style"),
+    Input("mbtiles-metadata-store", "data"),
+    Input("mbtiles-job-store", "data"),
+)
+def toggle_local_tile_card(meta, mbtiles_job):
+    if mbtiles_job and mbtiles_job.get("job_id"):
+        return {"display": "none"}
+    if meta and meta.get("mbtiles_path"):
+        tileserver_manager.start()
+        return {"display": "block"}
+    return {"display": "none"}
 
 
 if __name__ == "__main__":
     app.run(debug=True)
-@app.callback(
-    Output("zoom-indicator", "children"),
-    Input("zoom-store", "data"),
-)
-def update_zoom_indicator(zoom_state):
-    state = zoom_state or {}
-    if isinstance(state, list) and state:
-        state = state[-1]
-    if not isinstance(state, dict):
-        state = {"zoom": state} if isinstance(state, (int, float)) else {}
-    zoom_value = state.get("zoom")
-    if zoom_value is None:
-        return "Zoom : --"
-    return f"Zoom : {zoom_value:.1f}"

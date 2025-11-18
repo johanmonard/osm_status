@@ -1,0 +1,109 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Local Vector Tiles</title>
+    <link
+      href="https://unpkg.com/maplibre-gl@3.6.1/dist/maplibre-gl.css"
+      rel="stylesheet"
+    />
+    <style>
+      html,
+      body,
+      #map {
+        height: 100%;
+        width: 100%;
+        margin: 0;
+        padding: 0;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="map"></div>
+    <script src="https://unpkg.com/maplibre-gl@3.6.1/dist/maplibre-gl.js"></script>
+    <script>
+      const metadataUrl = "http://127.0.0.1:8090/metadata.json";
+      const vectorStyleUrl = "http://127.0.0.1:8090/styles/osm-bright/style.json";
+
+      const map = new maplibregl.Map({
+        container: "map",
+        style: "https://basemaps.cartocdn.com/gl/positron-gl-style/style.json",
+        center: [0, 0],
+        zoom: 2,
+      });
+
+      const state = {
+        meta: null,
+        vectorStyle: null,
+        fitted: false,
+      };
+
+      function ensureVectorSource() {
+        if (!map.getSource("vectiles")) {
+          map.addSource("vectiles", {
+            type: "vector",
+            tiles: ["http://127.0.0.1:8090/data/vectiles/{z}/{x}/{y}.pbf"],
+            minzoom: 4,
+            maxzoom: 16,
+          });
+        }
+      }
+
+      function applyVectorLayers() {
+        if (!state.vectorStyle || !Array.isArray(state.vectorStyle.layers) || !map.isStyleLoaded()) {
+          return;
+        }
+        ensureVectorSource();
+        const firstSymbolLayer = map.getStyle().layers.find((layer) => layer.type === "symbol")?.id;
+        state.vectorStyle.layers.forEach((layer) => {
+          if (!layer.source || !layer["source-layer"]) {
+            return;
+          }
+          const layerId = `vector-${layer.id}`;
+          if (map.getLayer(layerId)) {
+            map.removeLayer(layerId);
+          }
+          map.addLayer(
+            {
+              ...layer,
+              id: layerId,
+              source: "vectiles",
+            },
+            firstSymbolLayer
+          );
+        });
+      }
+
+      function fitToBounds() {
+        if (state.fitted || !state.meta || !state.meta.bounds) {
+          return;
+        }
+        const [west, south, east, north] = state.meta.bounds.split(",").map(Number);
+        map.fitBounds(
+          [
+            [west, south],
+            [east, north],
+          ],
+          { padding: 20 }
+        );
+        state.fitted = true;
+      }
+
+      map.on("load", () => {
+        fitToBounds();
+        applyVectorLayers();
+      });
+
+      Promise.all([fetch(metadataUrl).then((r) => r.json()), fetch(vectorStyleUrl).then((r) => r.json())])
+        .then(([meta, vectorStyle]) => {
+          state.meta = meta;
+          state.vectorStyle = vectorStyle;
+          if (map.isStyleLoaded()) {
+            fitToBounds();
+            applyVectorLayers();
+          }
+        })
+        .catch((err) => console.warn("Failed to set up tiles", err));
+    </script>
+  </body>
+</html>

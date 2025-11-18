@@ -4,3 +4,7 @@ plotly>=5.17
 geopandas>=0.14
 pyproj>=3.6
 requests>=2.31
+mercantile>=1.2
+mapbox-vector-tile>=2.0
+fastapi>=0.110
+uvicorn>=0.23

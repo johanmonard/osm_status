@@ -31,6 +31,7 @@ class BackgroundJobManager:
     ) -> BackgroundJob:
         job_id = str(uuid.uuid4())
         job = BackgroundJob(job_id=job_id, status="running")
+        print(f"[BackgroundJobManager] Creating job {job_id} for {target.__name__}", flush=True)
 
         def _progress_callback(progress: float, message: str = ""):
             with self._lock:
@@ -42,17 +43,20 @@ class BackgroundJobManager:
 
         def _runner():
             try:
+                print(f"[BackgroundJobManager] Job {job_id} started", flush=True)
                 result = target(*args, progress_callback=_progress_callback, **kwargs)
                 with self._lock:
                     job.status = "completed"
                     job.progress = 1.0
                     job.message = "Done"
                     job.result = result
+                print(f"[BackgroundJobManager] Job {job_id} completed", flush=True)
             except Exception as exc:  # pragma: no cover - surfaces error in UI
                 with self._lock:
                     job.status = "failed"
                     job.error = str(exc)
                     job.message = "Failed"
+                print(f"[BackgroundJobManager] Job {job_id} failed: {exc}", flush=True)
 
         thread = threading.Thread(target=_runner, daemon=True)
         with self._lock:
